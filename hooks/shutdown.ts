@@ -3,8 +3,10 @@
  *
  * Exiting GJC does not close the herdr pane (a shell remains), and custom agent
  * reports have no process binding, so without an explicit retraction herdr
- * keeps showing the last GJC state forever. On shutdown we release the custom
- * agent authority so the pane stops advertising a GJC agent.
+ * keeps showing the last GJC state forever. On shutdown we stop the heartbeat
+ * (see startup.ts) and release the custom agent authority so the pane stops
+ * advertising a GJC agent — stopping the timer first guarantees no heartbeat
+ * report re-adds GJC after the release lands.
  *
  * `release-agent` is seq-gated exactly like reports, so we pass a fresh
  * monotonic `--seq`; otherwise a release older than the last report is ignored.
@@ -17,6 +19,16 @@ import { execFileSync } from "node:child_process";
 
 export default function (api: { on: (event: string, handler: () => void) => void }) {
 	api.on("session_shutdown", () => {
+		// Stop the shared heartbeat so nothing re-reports GJC after release.
+		const g = globalThis as unknown as {
+			__herdrGjc?: { timer: ReturnType<typeof setInterval> | null };
+		};
+		const hb = g.__herdrGjc;
+		if (hb?.timer) {
+			clearInterval(hb.timer);
+			hb.timer = null;
+		}
+
 		const paneId = process.env.HERDR_PANE_ID;
 		if (process.env.HERDR_ENV !== "1" || !paneId) return;
 		try {

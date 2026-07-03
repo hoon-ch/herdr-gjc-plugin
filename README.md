@@ -28,6 +28,19 @@ the `herdr` CLI via Node's own `child_process` (the injected `exec` is denied).
 | `agent_end`               | `report-agent --state idle`               | idle                           |
 | `session_shutdown`        | `release-agent` (synchronous)             | GJC removed from herdr on exit |
 
+Every reported state is also **refreshed on a heartbeat** while the session is
+alive (default every 15s, override with `HERDR_GJC_HEARTBEAT_MS`). herdr treats
+a custom source as lower priority than its own agent detection and can drop it
+mid-turn when its detection pass reconciles the pane or the server reloads
+manifests. Because reports are edge-triggered (one per state change), a dropped
+GJC would otherwise stay invisible until the next transition — i.e. it vanishes
+from the Agents list during long tasks and only reappears when `agent_end`
+fires `idle`. The heartbeat re-sends the current state so any transient loss
+self-heals within one interval instead of lasting the whole task. The hooks
+share a single timer via `globalThis` (the installer copies only declared
+files, so they cannot share a module); `session_shutdown` stops it before
+releasing.
+
 Notes:
 
 - Every report carries a monotonic `--seq` (`Date.now()`). herdr ignores any
