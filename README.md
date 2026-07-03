@@ -44,7 +44,8 @@ Notes:
 ## Install
 
 ```bash
-gjc plugin install --local ~/repos/herdr-gjc-plugin --user
+./install.sh
+# or: gjc plugin install --local ~/repos/herdr-gjc-plugin --user
 ```
 
 Restart GJC (or `gjc --resume`) after installing so the plugin loads. Plugins
@@ -56,31 +57,61 @@ Edit the source in this repo, then reinstall:
 
 ```bash
 ./reinstall.sh
-# or:
-gjc plugin install --local ~/repos/herdr-gjc-plugin --user --force
+# or: gjc plugin install --local ~/repos/herdr-gjc-plugin --user --force
 ```
 
 `install` copies the validated, hashed files into
 `~/.gjc/agent/gjc-plugins/herdr-agent-state/`, so this repo is the source of
-truth and the installed copy runs independently. Editing the installed copy
-directly triggers a hash-drift quarantine — always edit here and reinstall.
+truth and the installed copy runs independently.
 
-## Manage
+## Uninstall
 
 ```bash
-gjc plugin list                          # show installed bundles
-gjc plugin uninstall herdr-agent-state   # remove
+./uninstall.sh
 ```
+
+Do **not** rely on `gjc plugin uninstall herdr-agent-state` — see Caveats.
+
+## Scripts
+
+| Script          | What it does                                                        |
+| --------------- | ------------------------------------------------------------------- |
+| `install.sh`    | `gjc plugin install --local "$PWD" --user` (first install)          |
+| `reinstall.sh`  | same with `--force` (apply edits)                                   |
+| `uninstall.sh`  | removes the bundle directly (registry entry + installed dir)        |
+
+## Caveats
+
+1. **Restart to (un)load.** GJC loads plugins at session start. Install,
+   reinstall, and uninstall only affect sessions started afterwards; a running
+   session keeps whatever it loaded until you restart it (or `gjc --resume`).
+
+2. **Never edit the installed copy.** The installed tree at
+   `~/.gjc/agent/gjc-plugins/herdr-agent-state/` is hashed at install time.
+   Editing it directly triggers a hash-drift quarantine and the hooks stop
+   loading. Always edit here in the repo and run `./reinstall.sh`.
+
+3. **`gjc plugin uninstall` does not remove this plugin.** `gjc plugin install
+   --local` uses GJC's plugin-bundle installer, but `gjc plugin uninstall` only
+   handles marketplace/npm plugins — it prints `✔ Uninstalled` without touching
+   the GJC-bundle registry (`~/.gjc/agent/gjc-plugins/registry.json`) or the
+   installed files. Use `./uninstall.sh`, which deletes the registry entry and
+   the installed directory itself. (Observed on GJC 0.7.10.)
+
+4. **Hard kill leaves stale state.** `session_shutdown` fires on graceful exits
+   (Ctrl+D, `/exit`, Ctrl+C). A `SIGKILL`/crash cannot run it, so herdr keeps
+   the last reported state until the pane closes.
 
 ## Layout
 
 ```
 gajae-plugin.json     # plugin manifest (kind: gajae-code-plugin, hooks[])
 hooks/
-  startup.ts          # session_start  -> idle
-  working.ts          # agent_start    -> working
-  blocked.ts          # tool_call/ask  -> blocked
-  unblock.ts          # tool_result/ask-> working
-  idle.ts             # agent_end      -> idle
+  startup.ts          # session_start   -> idle
+  working.ts          # agent_start     -> working
+  blocked.ts          # tool_call/ask   -> blocked
+  unblock.ts          # tool_result/ask -> working
+  idle.ts             # agent_end       -> idle
   shutdown.ts         # session_shutdown-> release-agent
+install.sh  reinstall.sh  uninstall.sh
 ```
