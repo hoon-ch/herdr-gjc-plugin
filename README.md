@@ -29,21 +29,23 @@ the `herdr` CLI via Node's own `child_process` (the injected `exec` is denied).
 | `session_shutdown`        | `release-agent` (synchronous)             | GJC removed from herdr on exit |
 
 Every reported state is also **refreshed on a heartbeat** while the session is
-alive (default every 15s, override with `HERDR_GJC_HEARTBEAT_MS`). herdr treats
-a custom source as lower priority than its own agent detection and can drop it
+alive (default every 5s, override with `HERDR_GJC_HEARTBEAT_MS`). Each state
+transition also sends a short follow-up burst at 1s and 3s. herdr treats a
+custom source as lower priority than its own agent detection and can drop it
 mid-turn when its detection pass reconciles the pane or the server reloads
 manifests. Because reports are edge-triggered (one per state change), a dropped
 GJC would otherwise stay invisible until the next transition — i.e. it vanishes
 from the Agents list during long tasks and only reappears when `agent_end`
-fires `idle`. The heartbeat re-sends the current state so any transient loss
-self-heals within one interval instead of lasting the whole task. The hooks
+fires `idle`. The heartbeat/burst re-send the current state so any transient loss
+self-heals quickly instead of lasting the whole task. The hooks
 share a single timer via `globalThis` (the installer copies only declared
 files, so they cannot share a module); `session_shutdown` stops it before
 releasing.
 
 Notes:
 
-- Every report carries a monotonic `--seq` (`Date.now()`). herdr ignores any
+- Every report carries a strictly increasing `--seq` (wall-clock ms, bumped when
+  multiple reports happen in the same millisecond). herdr ignores any
   report whose seq is `<=` the last accepted seq for the source, so without
   increasing seqs reports would be silently dropped.
 - Hooks are a no-op outside a herdr pane (guarded on `HERDR_ENV` /
@@ -61,6 +63,11 @@ Notes:
 # or: gjc plugin install --local ~/repos/herdr-gjc-plugin --user
 ```
 
+```powershell
+.\install.ps1
+# or: gjc plugin install --local $PWD --user
+```
+
 Restart GJC (or `gjc --resume`) after installing so the plugin loads. Plugins
 load at session start; an already-running session is not affected until restart.
 
@@ -73,9 +80,15 @@ Edit the source in this repo, then reinstall:
 # or: gjc plugin install --local ~/repos/herdr-gjc-plugin --user --force
 ```
 
-`install` copies the validated, hashed files into
-`~/.gjc/agent/gjc-plugins/herdr-agent-state/`, so this repo is the source of
-truth and the installed copy runs independently.
+```powershell
+.\reinstall.ps1
+# or: gjc plugin install --local $PWD --user --force
+```
+
+`install` copies the validated, hashed files into the user GJC plugin directory
+(`~/.gjc/agent/gjc-plugins/herdr-agent-state/` on Unix-like systems,
+`$HOME\.gjc\agent\gjc-plugins\herdr-agent-state\` on Windows), so this repo is
+the source of truth and the installed copy runs independently.
 
 ## Uninstall
 
@@ -83,15 +96,19 @@ truth and the installed copy runs independently.
 ./uninstall.sh
 ```
 
+```powershell
+.\uninstall.ps1
+```
+
 Do **not** rely on `gjc plugin uninstall herdr-agent-state` — see Caveats.
 
 ## Scripts
 
-| Script          | What it does                                                        |
-| --------------- | ------------------------------------------------------------------- |
-| `install.sh`    | `gjc plugin install --local "$PWD" --user` (first install)          |
-| `reinstall.sh`  | same with `--force` (apply edits)                                   |
-| `uninstall.sh`  | removes the bundle directly (registry entry + installed dir)        |
+| Script                         | What it does                                                        |
+| ------------------------------ | ------------------------------------------------------------------- |
+| `install.sh` / `install.ps1`     | `gjc plugin install --local <repo> --user` (first install)          |
+| `reinstall.sh` / `reinstall.ps1` | same with `--force` (apply edits)                                   |
+| `uninstall.sh` / `uninstall.ps1` | removes the bundle directly (registry entry + installed dir)        |
 
 ## Caveats
 
@@ -99,17 +116,18 @@ Do **not** rely on `gjc plugin uninstall herdr-agent-state` — see Caveats.
    reinstall, and uninstall only affect sessions started afterwards; a running
    session keeps whatever it loaded until you restart it (or `gjc --resume`).
 
-2. **Never edit the installed copy.** The installed tree at
-   `~/.gjc/agent/gjc-plugins/herdr-agent-state/` is hashed at install time.
-   Editing it directly triggers a hash-drift quarantine and the hooks stop
-   loading. Always edit here in the repo and run `./reinstall.sh`.
+2. **Never edit the installed copy.** The installed tree under the user GJC
+   plugin directory is hashed at install time. Editing it directly triggers a
+   hash-drift quarantine and the hooks stop loading. Always edit here in the repo
+   and run `./reinstall.sh` or `.\reinstall.ps1`.
 
 3. **`gjc plugin uninstall` does not remove this plugin.** `gjc plugin install
    --local` uses GJC's plugin-bundle installer, but `gjc plugin uninstall` only
    handles marketplace/npm plugins — it prints `✔ Uninstalled` without touching
-   the GJC-bundle registry (`~/.gjc/agent/gjc-plugins/registry.json`) or the
-   installed files. Use `./uninstall.sh`, which deletes the registry entry and
-   the installed directory itself. (Observed on GJC 0.7.10.)
+   the GJC-bundle registry (`~/.gjc/agent/gjc-plugins/registry.json`, or
+   `$HOME\.gjc\agent\gjc-plugins\registry.json` on Windows) or the installed
+   files. Use `./uninstall.sh` or `.\uninstall.ps1`, which deletes the registry
+   entry and the installed directory itself. (Observed on GJC 0.7.10.)
 
 4. **Hard kill leaves stale state.** `session_shutdown` fires on graceful exits
    (Ctrl+D, `/exit`, Ctrl+C). A `SIGKILL`/crash cannot run it, so herdr keeps
@@ -127,4 +145,5 @@ hooks/
   idle.ts             # agent_end       -> idle
   shutdown.ts         # session_shutdown-> release-agent
 install.sh  reinstall.sh  uninstall.sh
+install.ps1 reinstall.ps1 uninstall.ps1
 ```

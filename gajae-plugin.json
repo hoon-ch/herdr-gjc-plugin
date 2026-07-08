@@ -1,7 +1,7 @@
 {
   "kind": "gajae-code-plugin",
   "name": "herdr-agent-state",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "hooks": [
     { "name": "herdr-startup", "event": "session_start", "path": "hooks/startup.ts" },
     { "name": "herdr-shutdown", "event": "session_shutdown", "path": "hooks/shutdown.ts" },

@@ -21,16 +21,28 @@ export default function (api: { on: (event: string, handler: () => void) => void
 	api.on("session_shutdown", () => {
 		// Stop the shared heartbeat so nothing re-reports GJC after release.
 		const g = globalThis as unknown as {
-			__herdrGjc?: { timer: ReturnType<typeof setInterval> | null };
+			__herdrGjc?: {
+				timer: ReturnType<typeof setInterval> | null;
+				burstTimers?: ReturnType<typeof setTimeout>[];
+			};
+			__herdrGjcSeq?: number;
 		};
 		const hb = g.__herdrGjc;
 		if (hb?.timer) {
 			clearInterval(hb.timer);
 			hb.timer = null;
 		}
+		if (hb?.burstTimers) {
+			for (const timer of hb.burstTimers) clearTimeout(timer);
+			hb.burstTimers = [];
+		}
 
 		const paneId = process.env.HERDR_PANE_ID;
 		if (process.env.HERDR_ENV !== "1" || !paneId) return;
+		const now = Date.now();
+		const last = g.__herdrGjcSeq ?? 0;
+		const seq = now > last ? now : last + 1;
+		g.__herdrGjcSeq = seq;
 		try {
 			execFileSync(
 				"herdr",
@@ -43,7 +55,7 @@ export default function (api: { on: (event: string, handler: () => void) => void
 					"--agent",
 					"gjc",
 					"--seq",
-					String(Date.now()),
+					String(seq),
 				],
 				{ timeout: 3000, stdio: "ignore" },
 			);
