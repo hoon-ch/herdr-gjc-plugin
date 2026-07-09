@@ -51,7 +51,7 @@ export default function (api: { on: (event: string, handler: () => void) => void
 					"release-agent",
 					paneId,
 					"--source",
-					"custom:gjc",
+					"custom:herdr-gjc-plugin",
 					"--agent",
 					"gjc",
 					"--seq",

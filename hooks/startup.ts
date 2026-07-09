@@ -25,6 +25,10 @@ function herdrGjc(): HerdrGjc {
 	if (g.__herdrGjc) return g.__herdrGjc;
 
 	const canReport = () => process.env.HERDR_ENV === "1" && Boolean(process.env.HERDR_PANE_ID);
+	const visibleLooksWorking = (text: string) => {
+		const visibleTail = text.split(/\r?\n/).slice(-45).join("\n");
+		return /(?:^|\n)\s*[⠁-⣿]\s+Awaiting .*worker/.test(visibleTail) || /─\s*⤴\s*\d+(?:\.\d+)?\/s\b/.test(visibleTail);
+	};
 	const self: HerdrGjc = {
 		state: "idle",
 		custom: "idle",
@@ -50,24 +54,44 @@ function herdrGjc(): HerdrGjc {
 				const seq = self.nextSeq();
 				import("node:child_process")
 					.then(({ execFile }) => {
+						const report = (reportedState: HerdrState, reportedCustom: string) => {
+							execFile(
+								"herdr",
+								[
+									"pane",
+									"report-agent",
+									paneId,
+									"--source",
+									"custom:herdr-gjc-plugin",
+									"--agent",
+									"gjc",
+									"--state",
+									reportedState,
+									"--custom-status",
+									reportedCustom,
+									"--seq",
+									String(seq),
+								],
+								() => {},
+							);
+						};
+
+						if (stateSnapshot !== "idle") {
+							report(stateSnapshot, customSnapshot);
+							return;
+						}
+
 						execFile(
 							"herdr",
-							[
-								"pane",
-								"report-agent",
-								paneId,
-								"--source",
-								"custom:gjc",
-								"--agent",
-								"gjc",
-								"--state",
-								stateSnapshot,
-								"--custom-status",
-								customSnapshot,
-								"--seq",
-								String(seq),
-							],
-							() => {},
+							["pane", "read", paneId, "--source", "visible", "--lines", "45", "--format", "text"],
+							{ timeout: 1500 },
+							(error, stdout) => {
+								if (!error && visibleLooksWorking(String(stdout))) {
+									report("working", "working");
+									return;
+								}
+								report(stateSnapshot, customSnapshot);
+							},
 						);
 					})
 					.catch(() => {});

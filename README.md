@@ -37,7 +37,10 @@ manifests. Because reports are edge-triggered (one per state change), a dropped
 GJC would otherwise stay invisible until the next transition — i.e. it vanishes
 from the Agents list during long tasks and only reappears when `agent_end`
 fires `idle`. The heartbeat/burst re-send the current state so any transient loss
-self-heals quickly instead of lasting the whole task. The hooks
+self-heals quickly instead of lasting the whole task. When GJC has fired `idle`
+while the visible UI is still waiting on running subagents, the heartbeat reads
+the visible pane and reports `working` for active awaiting-worker / token-stream
+states instead of repeating the stale `idle`. The hooks
 share a single timer via `globalThis` (the installer copies only declared
 files, so they cannot share a module); `session_shutdown` stops it before
 releasing.
@@ -85,6 +88,27 @@ Edit the source in this repo, then reinstall:
 # or: gjc plugin install --local $PWD --user --force
 ```
 
+To deploy the current tree to private SSH hosts without committing hostnames,
+create a gitignored `.deploy-targets` file:
+
+```text
+unix this-machine-ssh-alias self
+unix my-other-mac-or-linux-host
+windows my-windows-host
+```
+
+Each machine can keep its own private `.deploy-targets`; synced deployments
+exclude that file. Mark the current machine with `self` when you keep a shared
+personal target list locally. `deploy-all.sh` always reinstalls locally, skips
+`self` entries, and with no `.deploy-targets` present it does a local-only
+reinstall.
+
+Then run:
+
+```bash
+./deploy-all.sh
+```
+
 `install` copies the validated, hashed files into the user GJC plugin directory
 (`~/.gjc/agent/gjc-plugins/herdr-agent-state/` on Unix-like systems,
 `$HOME\.gjc\agent\gjc-plugins\herdr-agent-state\` on Windows), so this repo is
@@ -108,6 +132,7 @@ Do **not** rely on `gjc plugin uninstall herdr-agent-state` — see Caveats.
 | ------------------------------ | ------------------------------------------------------------------- |
 | `install.sh` / `install.ps1`     | `gjc plugin install --local <repo> --user` (first install)          |
 | `reinstall.sh` / `reinstall.ps1` | same with `--force` (apply edits)                                   |
+| `deploy-all.sh`                  | reinstalls locally, syncs gitignored `.deploy-targets`, verifies remotes     |
 | `uninstall.sh` / `uninstall.ps1` | removes the bundle directly (registry entry + installed dir)        |
 
 ## Caveats
