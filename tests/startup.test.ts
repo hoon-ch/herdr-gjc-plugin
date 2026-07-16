@@ -22,6 +22,15 @@ type Request = {
 };
 type ResponseHandler = (request: Request & { id: string }, socket: Socket) => boolean;
 
+function sendResponse(
+	socket: Socket,
+	id: string,
+	body: { result?: Record<string, unknown>; error?: Record<string, unknown> },
+): boolean {
+	socket.end(`${JSON.stringify({ id, ...body })}\n`);
+	return true;
+}
+
 function registeredHandler(register: (api: HerdrHookApi) => void): HerdrHookHandler {
 	let handler: HerdrHookHandler | undefined;
 	register({
@@ -63,10 +72,27 @@ async function startServer(readDelayMs = 0, responseHandler?: ResponseHandler): 
 			const request = JSON.parse(buffer.slice(0, newline)) as Request & { id: string };
 			requests.push(request);
 			if (responseHandler?.(request, socket)) return;
-			const response =
-				request.method === "pane.read"
-					? { id: request.id, result: { read: { text: "◆ hud idle\n> Type your message..." } } }
-					: { id: request.id, result: {} };
+			let result: Record<string, unknown> = {};
+			if (request.method === "pane.read") {
+				result = { read: { text: "◆ hud idle\n> Type your message..." } };
+			} else if (request.method === "pane.get") {
+				result = {
+					pane: {
+						pane_id: request.params.pane_id,
+						terminal_id: "test-terminal",
+					},
+				};
+			} else if (request.method === "pane.list") {
+				result = {
+					panes: [
+						{
+							pane_id: "test-pane",
+							terminal_id: "test-terminal",
+						},
+					],
+				};
+			}
+			const response = { id: request.id, result };
 			setTimeout(() => socket.end(`${JSON.stringify(response)}\n`), request.method === "pane.read" ? readDelayMs : 0);
 		});
 	});
@@ -174,6 +200,7 @@ describe("session scope", () => {
 
 		expect(requests.filter(request => request.method === "pane.release_agent")).toHaveLength(1);
 	});
+
 });
 describe("report ordering", () => {
 	test("does not let a delayed idle inspection override a newer working state", async () => {
@@ -222,5 +249,104 @@ describe("report ordering", () => {
 
 		expect(requests.some(request => request.method === "pane.release_agent")).toBe(true);
 		expect(requests.some(request => request.method === "pane.report_agent")).toBe(false);
+	});
+});
+
+describe("space binding", () => {
+	test("follows the terminal when its pane moves between spaces", async () => {
+		let moved = false;
+		const requests = await startServer(0, (request, socket) => {
+			if (request.method === "pane.get") {
+				return sendResponse(
+					socket,
+					request.id,
+					moved
+						? { error: { code: "pane_not_found", message: "pane moved" } }
+						: {
+								result: {
+									pane: {
+										pane_id: "test-pane",
+										terminal_id: "terminal-123",
+									},
+								},
+							},
+				);
+			}
+			if (request.method === "pane.list") {
+				return sendResponse(socket, request.id, {
+					result: {
+						panes: [
+							{
+								pane_id: "moved-pane",
+								terminal_id: "terminal-123",
+							},
+						],
+					},
+				});
+			}
+			return false;
+		});
+		const reporter = herdrGjc();
+
+		reporter.report("working", undefined, { burst: false });
+		await wait(20);
+		moved = true;
+		reporter.report("blocked", "waiting", { burst: false });
+		await wait(20);
+
+		const reports = requests.filter(request => request.method === "pane.report_agent");
+		expect(reports[0]?.params.pane_id).toBe("test-pane");
+		expect(reports.at(-1)?.params.pane_id).toBe("moved-pane");
+	});
+
+	test("never reports to a stale pane when the terminal cannot be resolved", async () => {
+		let detached = false;
+		const requests = await startServer(0, (request, socket) => {
+			if (request.method === "pane.get") {
+				return sendResponse(
+					socket,
+					request.id,
+					detached
+						? { error: { code: "pane_not_found", message: "pane detached" } }
+						: {
+								result: {
+									pane: {
+										pane_id: "test-pane",
+										terminal_id: "terminal-123",
+									},
+								},
+							},
+				);
+			}
+			if (request.method === "pane.list") {
+				return sendResponse(socket, request.id, {
+					result: {
+						panes: [
+							{
+								pane_id: "reused-pane",
+								terminal_id: "different-terminal",
+							},
+						],
+					},
+				});
+			}
+			return false;
+		});
+		const reporter = herdrGjc();
+
+		reporter.report("working", undefined, { burst: false });
+		await wait(20);
+		detached = true;
+		reporter.report("blocked", "waiting", { burst: false });
+		await wait(20);
+
+		const reports = requests.filter(request => request.method === "pane.report_agent");
+		expect(reports).toHaveLength(1);
+		expect(reports[0]?.params).toEqual(
+			expect.objectContaining({
+				pane_id: "test-pane",
+				state: "working",
+			}),
+		);
 	});
 });

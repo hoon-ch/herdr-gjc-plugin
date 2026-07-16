@@ -47,6 +47,14 @@ an actually idle pane marked `working`. Lifecycle revisions prevent a
 slow pane read from overwriting a newer state, and shutdown suppresses in-flight
 reports before releasing the source. All lifecycle hooks share one reporter
 through `globalThis`.
+
+The reporter binds the launch-time public pane ID to Herdr's stable
+`terminal_id`. Before every state change, heartbeat, and release it validates
+that binding with `pane.get`; if a pane moved to another space and its old alias
+was lost after a Herdr restart, it finds the same terminal through `pane.list`.
+Once terminal identity is known, an unresolved binding is never sent to the
+stale public pane ID.
+
 In-process subagent sessions are ignored via GJC's `sessionMetadata.kind`; their
 startup/shutdown events must not overwrite or release the parent pane's source.
 

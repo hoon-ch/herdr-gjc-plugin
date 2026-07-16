@@ -7,6 +7,8 @@
  * each state transition also schedules a small burst of follow-up reports, so a
  * mid-turn drop is repaired quickly instead of waiting for the next lifecycle
  * edge. Every report carries a strictly increasing seq; herdr ignores stale seqs.
+ * Public pane IDs can change when panes move between spaces, so every report is
+ * rebound through Herdr's stable terminal ID before it is sent.
  */
 
 type HerdrState = "idle" | "working" | "blocked";
@@ -18,17 +20,30 @@ export type HerdrHookApi = {
 	on(event: string, handler: HerdrHookHandler): void;
 };
 
+const HERDR_SOURCE = "custom:herdr-gjc-plugin";
+const HERDR_AGENT = "gjc";
+
 export function isTopLevelSession(context?: HerdrHookContext): boolean {
 	return context?.sessionMetadata?.kind !== "sub";
 }
+type HerdrPaneInfo = {
+	pane_id?: unknown;
+	terminal_id?: unknown;
+};
 type HerdrResponse = {
 	id?: unknown;
 	error?: unknown;
-	result?: { read?: { text?: string } };
+	result?: {
+		read?: { text?: string };
+		pane?: HerdrPaneInfo;
+		panes?: HerdrPaneInfo[];
+	};
 };
 interface HerdrGjc {
 	state: HerdrState;
 	custom: string;
+	paneId: string | null;
+	terminalId: string | null;
 	timer: ReturnType<typeof setInterval> | null;
 	burstTimers: ReturnType<typeof setTimeout>[];
 	retryTimer: ReturnType<typeof setTimeout> | null;
@@ -103,55 +118,61 @@ export function herdrRequest(method: string, params: Record<string, unknown>): P
 	);
 }
 
+async function herdrViaCli(args: string[]): Promise<HerdrResponse> {
+	const { execFile } = await import("node:child_process");
+	return new Promise<HerdrResponse>((resolve, reject) => {
+		execFile("herdr", args, { timeout: 2000 }, (error, stdout) => {
+			if (error) {
+				reject(error);
+				return;
+			}
+			try {
+				const parsed: unknown = JSON.parse(String(stdout));
+				if (!parsed || typeof parsed !== "object") throw new Error("herdr CLI returned invalid JSON");
+				const response = parsed as HerdrResponse;
+				if (response.error !== undefined && response.error !== null) {
+					throw new Error("herdr CLI rejected the request");
+				}
+				resolve(response);
+			} catch (parseError) {
+				reject(parseError);
+			}
+		});
+	});
+}
+
 async function reportViaCli(paneId: string, state: HerdrState, custom: string, seq: number): Promise<void> {
 	const args = [
 		"pane",
 		"report-agent",
 		paneId,
 		"--source",
-		"custom:herdr-gjc-plugin",
+		HERDR_SOURCE,
 		"--agent",
-		"gjc",
+		HERDR_AGENT,
 		"--state",
 		state,
-		"--custom-status",
+		"--message",
 		custom,
 		"--seq",
 		String(seq),
 	];
 
-	const { execFile } = await import("node:child_process");
-	await new Promise<void>((resolve, reject) => {
-		execFile("herdr", args, { timeout: 2000 }, error => {
-			if (error) reject(error);
-			else resolve();
-		});
-	});
+	await herdrViaCli(args);
 }
 
 async function releaseViaCli(paneId: string, seq: number): Promise<void> {
-	const { execFile } = await import("node:child_process");
-	await new Promise<void>((resolve, reject) => {
-		execFile(
-			"herdr",
-			[
-				"pane",
-				"release-agent",
-				paneId,
-				"--source",
-				"custom:herdr-gjc-plugin",
-				"--agent",
-				"gjc",
-				"--seq",
-				String(seq),
-			],
-			{ timeout: 2000 },
-			error => {
-				if (error) reject(error);
-				else resolve();
-			},
-		);
-	});
+	await herdrViaCli([
+		"pane",
+		"release-agent",
+		paneId,
+		"--source",
+		HERDR_SOURCE,
+		"--agent",
+		HERDR_AGENT,
+		"--seq",
+		String(seq),
+	]);
 }
 
 export function visibleLooksWorking(text: string): boolean {
@@ -164,7 +185,7 @@ export function herdrGjc(): HerdrGjc {
 	const g = globalThis as unknown as { __herdrGjc?: HerdrGjc; __herdrGjcSeq?: number };
 	if (g.__herdrGjc) return g.__herdrGjc;
 
-	const canReport = () => process.env.HERDR_ENV === "1" && Boolean(process.env.HERDR_PANE_ID);
+	const canReport = () => process.env.HERDR_ENV === "1" && Boolean(self.paneId);
 	let self: HerdrGjc;
 	let latestAttemptSeq = 0;
 
@@ -186,15 +207,66 @@ export function herdrGjc(): HerdrGjc {
 		}, delay);
 		(self.retryTimer as { unref?: () => void }).unref?.();
 	};
+	const paneIdentity = (pane: HerdrPaneInfo | undefined): { paneId: string; terminalId: string } | null => {
+		const paneId = pane?.pane_id;
+		const terminalId = pane?.terminal_id;
+		if (typeof paneId !== "string" || !paneId || typeof terminalId !== "string" || !terminalId) return null;
+		return { paneId, terminalId };
+	};
+	const resolvePaneId = async (): Promise<string | null> => {
+		const candidate = self.paneId;
+		if (!candidate) return null;
+
+		let response: HerdrResponse | null = null;
+		try {
+			response = await herdrRequest("pane.get", { pane_id: candidate });
+		} catch {
+			try {
+				response = await herdrViaCli(["pane", "get", candidate]);
+			} catch {
+				// Continue with the stable terminal lookup when the public pane ID is stale.
+			}
+		}
+		const identity = paneIdentity(response?.result?.pane);
+		if (identity && (!self.terminalId || identity.terminalId === self.terminalId)) {
+			self.paneId = identity.paneId;
+			self.terminalId = identity.terminalId;
+			return identity.paneId;
+		}
+		if (!self.terminalId) return null;
+
+		response = null;
+		try {
+			response = await herdrRequest("pane.list", {});
+		} catch {
+			try {
+				response = await herdrViaCli(["pane", "list"]);
+			} catch {
+				// Never fall back to an unverified public pane ID once terminal identity is known.
+			}
+		}
+		const match = response?.result?.panes
+			?.map(paneIdentity)
+			.find(candidateIdentity => candidateIdentity?.terminalId === self.terminalId);
+		if (!match) return null;
+		self.paneId = match.paneId;
+		return match.paneId;
+	};
 	const reportNow = () => {
 		void (async () => {
-			const paneId = process.env.HERDR_PANE_ID;
-			if (self.released || !paneId || process.env.HERDR_ENV !== "1") return;
+			if (self.released || process.env.HERDR_ENV !== "1") return;
 
 			const lifecycleState = self.state;
 			const lifecycleRevision = self.revision;
 			let stateSnapshot = lifecycleState;
 			let customSnapshot = self.custom;
+			const paneId = await resolvePaneId();
+			if (self.released || self.revision !== lifecycleRevision) return;
+			if (!paneId) {
+				scheduleRetry();
+				return;
+			}
+
 			if (lifecycleState === "idle") {
 				try {
 					const response = await herdrRequest("pane.read", {
@@ -215,17 +287,16 @@ export function herdrGjc(): HerdrGjc {
 					// Keep the lifecycle state when pane inspection is temporarily unavailable.
 				}
 			}
-			if (self.released) return;
-			if (self.revision !== lifecycleRevision) return;
+			if (self.released || self.revision !== lifecycleRevision) return;
 
 			const seq = self.nextSeq();
 			latestAttemptSeq = seq;
 			const params: Record<string, unknown> = {
 				pane_id: paneId,
-				source: "custom:herdr-gjc-plugin",
-				agent: "gjc",
+				source: HERDR_SOURCE,
+				agent: HERDR_AGENT,
 				state: stateSnapshot,
-				custom_status: customSnapshot,
+				message: customSnapshot,
 				seq,
 			};
 
@@ -245,6 +316,8 @@ export function herdrGjc(): HerdrGjc {
 	self = {
 		state: "idle",
 		custom: "idle",
+		paneId: process.env.HERDR_PANE_ID?.trim() || null,
+		terminalId: null,
 		timer: null,
 		burstTimers: [],
 		retryTimer: null,
@@ -284,15 +357,16 @@ export function herdrGjc(): HerdrGjc {
 			if (self.released) return;
 			self.released = true;
 			self.stop();
-			const paneId = process.env.HERDR_PANE_ID;
-			if (!paneId || process.env.HERDR_ENV !== "1") return;
+			if (process.env.HERDR_ENV !== "1") return;
+			const paneId = await resolvePaneId();
+			if (!paneId) return;
 			const seq = self.nextSeq();
 			try {
 				try {
 					await herdrRequest("pane.release_agent", {
 						pane_id: paneId,
-						source: "custom:herdr-gjc-plugin",
-						agent: "gjc",
+						source: HERDR_SOURCE,
+						agent: HERDR_AGENT,
 						seq,
 					});
 				} catch {
