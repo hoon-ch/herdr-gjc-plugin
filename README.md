@@ -13,9 +13,9 @@ public GJC build also quarantines filesystem hook/extension discovery, so
 
 The one extensibility surface that still loads in the public binary is the
 **validated GJC plugin** (`loadConstrainedPluginHooks`). This plugin uses it to
-push lifecycle state to herdr's local socket API (`herdr pane report-agent` /
-`herdr pane release-agent`). The plugin API only exposes `on`, so the hooks call
-the `herdr` CLI via Node's own `child_process` (the injected `exec` is denied).
+send lifecycle state over herdr's local socket API (`pane.report_agent` /
+`pane.release_agent`). Reports wait for a socket acknowledgement, fall back to
+the `herdr` CLI for compatibility, and never use the denied plugin `exec` API.
 
 ## State mapping
 
@@ -26,24 +26,29 @@ the `herdr` CLI via Node's own `child_process` (the injected `exec` is denied).
 | `tool_call` (target `ask`)| `report-agent --state blocked`            | blocked / `waiting`            |
 | `tool_result` (target `ask`)| `report-agent --state working`          | back to working after answer   |
 | `agent_end`               | `report-agent --state idle`               | idle                           |
-| `session_shutdown`        | `release-agent` (synchronous)             | GJC removed from herdr on exit |
+| `session_shutdown`        | acknowledged `release-agent`               | GJC removed from herdr on exit |
 
 Every reported state is also **refreshed on a heartbeat** while the session is
-alive (default every 5s, override with `HERDR_GJC_HEARTBEAT_MS`). Each state
-transition also sends a short follow-up burst at 1s and 3s. herdr treats a
-custom source as lower priority than its own agent detection and can drop it
-mid-turn when its detection pass reconciles the pane or the server reloads
-manifests. Because reports are edge-triggered (one per state change), a dropped
-GJC would otherwise stay invisible until the next transition — i.e. it vanishes
-from the Agents list during long tasks and only reappears when `agent_end`
-fires `idle`. The heartbeat/burst re-send the current state so any transient loss
-self-heals quickly instead of lasting the whole task. When GJC has fired `idle`
-while the visible UI is still waiting on running subagents, the heartbeat reads
-the visible pane and reports `working` for active awaiting-worker / token-stream
-states instead of repeating the stale `idle`. The hooks
-share a single timer via `globalThis` (the installer copies only declared
-files, so they cannot share a module); `session_shutdown` stops it before
-releasing.
+alive (default every 2s, override with `HERDR_GJC_HEARTBEAT_MS`). Each state
+transition also sends a short follow-up burst at 1s and 3s. Delivery is
+acknowledged over `HERDR_SOCKET_PATH`; responses must carry the matching request
+ID and are capped at 1 MiB. A failed socket/CLI delivery is retried after 250ms
+with bounded backoff instead of being silently discarded.
+
+herdr can drop a custom lifecycle source when its pane/process reconciliation
+runs or the server reloads manifests. The heartbeat repairs a report that was
+accepted earlier and later evicted; the acknowledgement retry repairs a report
+that never arrived. When GJC has fired `idle` while the visible UI still shows
+live work, the heartbeat reads the visible pane and recognizes an active spinner
+near the prompt. Token-rate HUD values are intentionally ignored because the
+last completed turn leaves them visible at the idle prompt. Activity must appear
+in the bottom six lines, so stale progress higher in the scrollback does not keep
+an actually idle pane marked `working`. Lifecycle revisions prevent a
+slow pane read from overwriting a newer state, and shutdown suppresses in-flight
+reports before releasing the source. All lifecycle hooks share one reporter
+through `globalThis`.
+In-process subagent sessions are ignored via GJC's `sessionMetadata.kind`; their
+startup/shutdown events must not overwrite or release the parent pane's source.
 
 Notes:
 
@@ -169,6 +174,8 @@ hooks/
   unblock.ts          # tool_result/ask -> working
   idle.ts             # agent_end       -> idle
   shutdown.ts         # session_shutdown-> release-agent
+tests/
+  startup.test.ts       # activity, ordering, and shutdown race regressions
 install.sh  reinstall.sh  uninstall.sh
 install.ps1 reinstall.ps1 uninstall.ps1
 ```
