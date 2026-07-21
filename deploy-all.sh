@@ -39,7 +39,7 @@ copy_to_windows() {
 	echo "==> $host (windows): syncing"
 	ssh -n "$host" 'New-Item -ItemType Directory -Force "$HOME\repos\herdr-gjc-plugin\hooks" | Out-Null'
 	scp gajae-plugin.json README.md install.ps1 reinstall.ps1 uninstall.ps1 install.sh reinstall.sh uninstall.sh deploy-all.sh "$host:repos/herdr-gjc-plugin/"
-	scp hooks/startup.ts hooks/working.ts hooks/idle.ts hooks/blocked.ts hooks/unblock.ts hooks/shutdown.ts "$host:repos/herdr-gjc-plugin/hooks/"
+	scp hooks/startup.ts hooks/working.ts hooks/turn.ts hooks/idle.ts hooks/blocked.ts hooks/unblock.ts hooks/shutdown.ts "$host:repos/herdr-gjc-plugin/hooks/"
 	echo "==> $host (windows): reinstalling"
 	ssh -n "$host" 'Set-Location "$HOME\repos\herdr-gjc-plugin"; .\reinstall.ps1'
 	echo "==> $host (windows): verifying"

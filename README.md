@@ -22,10 +22,12 @@ the `herdr` CLI for compatibility, and never use the denied plugin `exec` API.
 | GJC hook event            | herdr call                                | Result                         |
 | ------------------------- | ----------------------------------------- | ------------------------------ |
 | `session_start`           | `report-agent --state idle`               | Pane recognized as GJC on launch |
-| `agent_start`             | `report-agent --state working`            | working                        |
+| `agent_start`             | `report-agent --state working`            | working (once per prompt)      |
+| `turn_start`              | `report-agent --state working`            | re-asserts working each turn (incl. continuation) |
 | `tool_call` (target `ask`)| `report-agent --state blocked`            | blocked / `waiting`            |
 | `tool_result` (target `ask`)| `report-agent --state working`          | back to working after answer   |
-| `agent_end`               | `report-agent --state idle`               | idle                           |
+| `agent_end` (`stopReason: completed`/`cancelled`) | `report-agent --state idle` | idle |
+| `agent_end` (`stopReason: paused`/`maintenance`) | none | stays working (suspended/compacting) |
 | `session_shutdown`        | acknowledged `release-agent`               | GJC removed from herdr on exit |
 
 Every reported state is also **refreshed on a heartbeat** while the session is
@@ -38,15 +40,14 @@ with bounded backoff instead of being silently discarded.
 herdr can drop a custom lifecycle source when its pane/process reconciliation
 runs or the server reloads manifests. The heartbeat repairs a report that was
 accepted earlier and later evicted; the acknowledgement retry repairs a report
-that never arrived. When GJC has fired `idle` while the visible UI still shows
-live work, the heartbeat reads the visible pane and recognizes an active spinner
-near the prompt. Token-rate HUD values are intentionally ignored because the
-last completed turn leaves them visible at the idle prompt. Activity must appear
-in the bottom six lines, so stale progress higher in the scrollback does not keep
-an actually idle pane marked `working`. Lifecycle revisions prevent a
-slow pane read from overwriting a newer state, and shutdown suppresses in-flight
-reports before releasing the source. All lifecycle hooks share one reporter
-through `globalThis`.
+that never arrived. The reported state is driven entirely by GJC's authoritative
+lifecycle signals, not by scraping the terminal. `agent_end` carries a
+`stopReason`, and only a `completed` (or `cancelled`) loop is treated as idle: a
+`paused` loop is suspended and will resume, and a `maintenance` loop is
+auto-compacting and resumes afterwards, so neither demotes a working pane to
+idle. Lifecycle revisions prevent a slow pane lookup from overwriting a newer
+state, and shutdown suppresses in-flight reports before releasing the source. All
+lifecycle hooks share one reporter through `globalThis`.
 
 The reporter binds the launch-time public pane ID to Herdr's stable
 `terminal_id`. Before every state change, heartbeat, and release it validates

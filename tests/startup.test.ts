@@ -8,13 +8,13 @@ import registerStartup, {
 	herdrRequest,
 	type HerdrHookApi,
 	type HerdrHookHandler,
-	visibleLooksWorking,
 } from "../hooks/startup";
 import registerBlocked from "../hooks/blocked";
 import registerIdle from "../hooks/idle";
 import registerShutdown from "../hooks/shutdown";
 import registerUnblock from "../hooks/unblock";
 import registerWorking from "../hooks/working";
+import registerTurn from "../hooks/turn";
 
 type Request = {
 	method: string;
@@ -58,7 +58,7 @@ function resetReporter(): void {
 	delete g.__herdrGjc;
 }
 
-async function startServer(readDelayMs = 0, responseHandler?: ResponseHandler): Promise<Request[]> {
+async function startServer(responseHandler?: ResponseHandler): Promise<Request[]> {
 	const requests: Request[] = [];
 	socketDirectory = await mkdtemp(join(tmpdir(), "herdr-gjc-test-"));
 	const socketPath = join(socketDirectory, "herdr.sock");
@@ -73,9 +73,7 @@ async function startServer(readDelayMs = 0, responseHandler?: ResponseHandler): 
 			requests.push(request);
 			if (responseHandler?.(request, socket)) return;
 			let result: Record<string, unknown> = {};
-			if (request.method === "pane.read") {
-				result = { read: { text: "◆ hud idle\n> Type your message..." } };
-			} else if (request.method === "pane.get") {
+			if (request.method === "pane.get") {
 				result = {
 					pane: {
 						pane_id: request.params.pane_id,
@@ -93,7 +91,7 @@ async function startServer(readDelayMs = 0, responseHandler?: ResponseHandler): 
 				};
 			}
 			const response = { id: request.id, result };
-			setTimeout(() => socket.end(`${JSON.stringify(response)}\n`), request.method === "pane.read" ? readDelayMs : 0);
+			setTimeout(() => socket.end(`${JSON.stringify(response)}\n`), 0);
 		});
 	});
 	await new Promise<void>((resolve, reject) => {
@@ -125,7 +123,7 @@ afterEach(async () => {
 
 describe("herdrRequest", () => {
 	test("rejects a response whose request ID does not match", async () => {
-		await startServer(0, (_request, socket) => {
+		await startServer((_request, socket) => {
 			socket.end(`${JSON.stringify({ id: "wrong-id", result: {} })}\n`);
 			return true;
 		});
@@ -134,7 +132,7 @@ describe("herdrRequest", () => {
 	});
 
 	test("accepts a matching response split across socket chunks", async () => {
-		await startServer(0, (request, socket) => {
+		await startServer((request, socket) => {
 			const response = `${JSON.stringify({ id: request.id, result: {} })}\n`;
 			const midpoint = Math.floor(response.length / 2);
 			socket.write(response.slice(0, midpoint));
@@ -145,19 +143,66 @@ describe("herdrRequest", () => {
 		await expect(herdrRequest("pane.report_agent", {})).resolves.toEqual(expect.objectContaining({ result: {} }));
 	});
 });
-describe("visibleLooksWorking", () => {
-	test("recognizes an active spinner near the prompt", () => {
-		expect(visibleLooksWorking("⠸ Awaiting revised roadmap plan ⟦esc⟧\n◆ hud\n⬢ model\n╭─╮\n│ > prompt │\n╰─╯\n")).toBe(true);
+const mainContext = { sessionMetadata: { kind: "main" as const } };
+
+describe("agent_end stop reasons", () => {
+	test("reports idle when the loop completed", async () => {
+		const requests = await startServer();
+		const idle = registeredHandler(registerIdle);
+		await idle({ type: "agent_end", stopReason: "completed" }, mainContext);
+		await wait(20);
+
+		const reports = requests.filter(request => request.method === "pane.report_agent");
+		expect(reports.length).toBeGreaterThanOrEqual(1);
+		expect(reports.every(request => request.params.state === "idle")).toBe(true);
 	});
 
-	test("ignores idle prompts, stale token rates, and old activity", () => {
-		expect(visibleLooksWorking("◆ hud idle\n╭─╮\n│ > prompt │\n╰─╯\n")).toBe(false);
-		expect(
-			visibleLooksWorking(
-				"⬢ GPT-5.6-Sol · ◒ med · 13.1% / 📁 …/a-eyes-cloud / ⤴ 40.0/s / $0.63 (sub)\n╭─╮\n│ > Type your message... │\n╰─╯\n",
-			),
-		).toBe(false);
-		expect(visibleLooksWorking("⠸ Old activity\n1\n2\n3\n4\n5\n6\nidle prompt\n")).toBe(false);
+	test("treats a missing stop reason as completed", async () => {
+		const requests = await startServer();
+		const idle = registeredHandler(registerIdle);
+		await idle({ type: "agent_end" }, mainContext);
+		await wait(20);
+
+		const reports = requests.filter(request => request.method === "pane.report_agent");
+		expect(reports.some(request => request.params.state === "idle")).toBe(true);
+	});
+
+	test("never goes idle while suspended or under maintenance", async () => {
+		const requests = await startServer();
+		const working = registeredHandler(registerWorking);
+		const idle = registeredHandler(registerIdle);
+		await working({ type: "agent_start" }, mainContext);
+		await wait(20);
+		await idle({ type: "agent_end", stopReason: "paused" }, mainContext);
+		await idle({ type: "agent_end", stopReason: "maintenance" }, mainContext);
+		await wait(20);
+
+		const states = requests
+			.filter(request => request.method === "pane.report_agent")
+			.map(request => request.params.state);
+		expect(states).toContain("working");
+		expect(states).not.toContain("idle");
+	});
+
+	test("re-asserts working when a continuation turn starts after idle", async () => {
+		const requests = await startServer();
+		const working = registeredHandler(registerWorking);
+		const idle = registeredHandler(registerIdle);
+		const turn = registeredHandler(registerTurn);
+		await working({ type: "agent_start" }, mainContext);
+		await wait(20);
+		await idle({ type: "agent_end", stopReason: "completed" }, mainContext);
+		await wait(20);
+		// Goal/autonomous continuation resumes with a fresh turn_start but no new
+		// agent_start; the pane must return to working instead of staying idle.
+		await turn({ type: "turn_start", turnIndex: 1, timestamp: Date.now() }, mainContext);
+		await wait(20);
+
+		const states = requests
+			.filter(request => request.method === "pane.report_agent")
+			.map(request => request.params.state);
+		expect(states).toContain("idle");
+		expect(states.at(-1)).toBe("working");
 	});
 });
 
@@ -168,6 +213,7 @@ describe("session scope", () => {
 		for (const register of [
 			registerStartup,
 			registerWorking,
+			registerTurn,
 			registerIdle,
 			registerBlocked,
 			registerUnblock,
@@ -203,59 +249,76 @@ describe("session scope", () => {
 
 });
 describe("report ordering", () => {
-	test("does not let a delayed idle inspection override a newer working state", async () => {
-		const requests = await startServer(60);
+	test("the newest reported state wins", async () => {
+		const requests = await startServer();
 		const reporter = herdrGjc();
 		reporter.report("idle", undefined, { burst: false });
-		await wait(10);
 		reporter.report("working", undefined, { burst: false });
-		await wait(100);
+		await wait(40);
 
 		const reports = requests.filter(request => request.method === "pane.report_agent");
-		expect(reports.length).toBeGreaterThanOrEqual(1);
-		expect(reports.every(request => request.params.state === "working")).toBe(true);
+		expect(reports.at(-1)?.params.state).toBe("working");
 	});
-	test("discards an older idle inspection after a newer idle revision", async () => {
-		let readCount = 0;
-		const requests = await startServer(0, (request, socket) => {
-			if (request.method !== "pane.read") return false;
-			readCount += 1;
-			const text = readCount === 2 ? "⠸ Active work\n> prompt" : "> idle prompt";
-			const delay = readCount === 1 ? 80 : 20;
+
+	test("does not resurrect the agent after release during a slow pane lookup", async () => {
+		const requests = await startServer((request, socket) => {
+			if (request.method !== "pane.get") return false;
 			setTimeout(
-				() => socket.end(`${JSON.stringify({ id: request.id, result: { read: { text } } })}\n`),
-				delay,
+				() =>
+					sendResponse(socket, request.id, {
+						result: { pane: { pane_id: request.params.pane_id, terminal_id: "test-terminal" } },
+					}),
+				60,
 			);
 			return true;
 		});
 		const reporter = herdrGjc();
 		reporter.report("idle", undefined, { burst: false });
-		await wait(5);
-		reporter.report("idle", undefined, { burst: false });
-		await wait(120);
-
-		const reports = requests.filter(request => request.method === "pane.report_agent");
-		expect(reports).toHaveLength(1);
-		expect(reports[0]?.params.state).toBe("working");
-	});
-
-	test("does not resurrect the agent after release during pane inspection", async () => {
-		const requests = await startServer(60);
-		const reporter = herdrGjc();
-		reporter.report("idle", undefined, { burst: false });
 		await wait(10);
 		await reporter.release();
-		await wait(100);
+		await wait(120);
 
 		expect(requests.some(request => request.method === "pane.release_agent")).toBe(true);
 		expect(requests.some(request => request.method === "pane.report_agent")).toBe(false);
 	});
 });
 
+describe("blocked flow", () => {
+	test("stays blocked when the loop suspends on a headless ask", async () => {
+		const requests = await startServer();
+		const blocked = registeredHandler(registerBlocked);
+		const idle = registeredHandler(registerIdle);
+		await blocked({ type: "tool_call" }, mainContext);
+		await wait(20);
+		await idle({ type: "agent_end", stopReason: "paused" }, mainContext);
+		await wait(20);
+
+		const reports = requests.filter(request => request.method === "pane.report_agent");
+		expect(reports.length).toBeGreaterThanOrEqual(1);
+		expect(reports.every(request => request.params.state === "blocked")).toBe(true);
+	});
+
+	test("returns to working when the ask resolves", async () => {
+		const requests = await startServer();
+		const blocked = registeredHandler(registerBlocked);
+		const unblock = registeredHandler(registerUnblock);
+		await blocked({ type: "tool_call" }, mainContext);
+		await wait(20);
+		await unblock({ type: "tool_result" }, mainContext);
+		await wait(20);
+
+		const states = requests
+			.filter(request => request.method === "pane.report_agent")
+			.map(request => request.params.state);
+		expect(states).toContain("blocked");
+		expect(states.at(-1)).toBe("working");
+	});
+});
+
 describe("space binding", () => {
 	test("follows the terminal when its pane moves between spaces", async () => {
 		let moved = false;
-		const requests = await startServer(0, (request, socket) => {
+		const requests = await startServer((request, socket) => {
 			if (request.method === "pane.get") {
 				return sendResponse(
 					socket,
@@ -301,7 +364,7 @@ describe("space binding", () => {
 
 	test("never reports to a stale pane when the terminal cannot be resolved", async () => {
 		let detached = false;
-		const requests = await startServer(0, (request, socket) => {
+		const requests = await startServer((request, socket) => {
 			if (request.method === "pane.get") {
 				return sendResponse(
 					socket,

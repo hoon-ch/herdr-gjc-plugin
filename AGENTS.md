@@ -10,7 +10,7 @@
 2. Small modules in `hooks/` reject in-process subagent events via `isTopLevelSession(context)` and delegate to the shared `herdrGjc()` reporter.
 3. `hooks/startup.ts` owns the process-global reporter (`globalThis.__herdrGjc`), state, timers, retries, and monotonic sequence numbers.
 4. Before reporting, the reporter validates the public pane ID with `pane.get` and binds it to Herdr's stable `terminal_id`. After a pane move or Herdr restart, `pane.list` re-resolves the current pane by terminal ID. Never restore an unverified stale-pane fallback.
-5. Reports use newline-delimited JSON over `HERDR_SOCKET_PATH`; the `herdr` CLI is the compatibility fallback. Idle reports may inspect the visible pane tail to detect active spinner output.
+5. Reports use newline-delimited JSON over `HERDR_SOCKET_PATH`; the `herdr` CLI is the compatibility fallback. State is derived from authoritative GJC lifecycle events only — never from scraping the visible pane. `agent_end` carries a `stopReason`, and `idle` is reported only for `completed`/`cancelled`; `paused` (suspended) and `maintenance` (auto-compaction) keep the current state so the pane is not falsely marked idle.
 6. `session_shutdown` stops timers and releases the agent authority. All failures are best-effort and must not break the GJC loop or shutdown.
 
 Preserve the concurrency guards: lifecycle `revision`, strictly increasing `seq`, `released` checks after awaits, and newest-attempt-only retry handling prevent stale async work from overwriting current state.
@@ -42,7 +42,7 @@ There is no separate build step and no repository lint/format configuration. Do 
 - Keep lifecycle files small: a default registration factory, `_event` for an unused payload, a top-level-session guard, then delegation to `herdrGjc()`.
 - Keep hook `event`, `target`, and `phase` declarations in `gajae-plugin.json` aligned with module behavior. `blocked`/`unblock` are scoped to the `ask` tool by the manifest.
 - Reuse the singleton reporter; never introduce a second socket client, timer owner, or sequence authority.
-- Treat canonical lifecycle state separately from a temporary reported snapshot. For example, idle spinner detection may emit `working` without mutating stored idle state.
+- Treat canonical lifecycle state separately from a temporary reported snapshot. Never derive state from terminal scrollback; branch on the `agent_end` `stopReason` instead.
 - Use socket-first/CLI-second async handling, bounded timeouts, acknowledged request IDs, and swallowed best-effort failures. Timers must be stopped on release and `unref()`ed while active.
 - Fix attribution by stable terminal identity, not by workspace labels, cwd guesses, or a cached public pane ID.
 
@@ -50,8 +50,8 @@ There is no separate build step and no repository lint/format configuration. Do 
 
 - `gajae-plugin.json` — plugin name, version, hook paths, events, targets, and phases.
 - `hooks/startup.ts` — entry hook, reporter singleton, transport, pane resolution, heartbeat, ordering, and retry logic.
-- `hooks/working.ts`, `idle.ts`, `blocked.ts`, `unblock.ts`, `shutdown.ts` — lifecycle-to-state adapters.
-- `tests/startup.test.ts` — protocol, activity detection, ordering, shutdown, subagent, and space-binding regressions.
+- `hooks/working.ts` (`agent_start`), `turn.ts` (`turn_start`), `idle.ts`, `blocked.ts`, `unblock.ts`, `shutdown.ts` — lifecycle-to-state adapters. `working.ts` fires once per prompt; `turn.ts` re-asserts working on every turn so continuation/maintenance-resumed runs are not stuck idle.
+- `tests/startup.test.ts` — protocol, `agent_end` stop-reason handling, blocked flow, ordering, shutdown, subagent, and space-binding regressions.
 - `deploy-all.sh` — local/remote deployment and installed-version verification.
 - `README.md` — supported behavior, installation, and operational caveats.
 

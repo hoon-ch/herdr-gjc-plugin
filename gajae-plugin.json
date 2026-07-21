@@ -1,11 +1,12 @@
 {
   "kind": "gajae-code-plugin",
   "name": "herdr-agent-state",
-  "version": "1.7.0",
+  "version": "1.10.0",
   "hooks": [
     { "name": "herdr-startup", "event": "session_start", "path": "hooks/startup.ts" },
     { "name": "herdr-shutdown", "event": "session_shutdown", "path": "hooks/shutdown.ts" },
     { "name": "herdr-working", "event": "agent_start", "path": "hooks/working.ts" },
+    { "name": "herdr-turn", "event": "turn_start", "path": "hooks/turn.ts" },
     { "name": "herdr-idle", "event": "agent_end", "path": "hooks/idle.ts" },
     { "name": "herdr-blocked", "event": "tool_call", "target": "ask", "phase": "before", "path": "hooks/blocked.ts" },
     { "name": "herdr-unblock", "event": "tool_result", "target": "ask", "path": "hooks/unblock.ts" }

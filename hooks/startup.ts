@@ -175,11 +175,6 @@ async function releaseViaCli(paneId: string, seq: number): Promise<void> {
 	]);
 }
 
-export function visibleLooksWorking(text: string): boolean {
-	const visibleLines = text.trimEnd().split(/\r?\n/);
-	const activeTail = visibleLines.slice(-6).join("\n");
-	return /(?:^|\n)\s*[⠁-⣿]\s+\S/.test(activeTail);
-}
 
 export function herdrGjc(): HerdrGjc {
 	const g = globalThis as unknown as { __herdrGjc?: HerdrGjc; __herdrGjcSeq?: number };
@@ -256,38 +251,15 @@ export function herdrGjc(): HerdrGjc {
 		void (async () => {
 			if (self.released || process.env.HERDR_ENV !== "1") return;
 
-			const lifecycleState = self.state;
 			const lifecycleRevision = self.revision;
-			let stateSnapshot = lifecycleState;
-			let customSnapshot = self.custom;
+			const stateSnapshot = self.state;
+			const customSnapshot = self.custom;
 			const paneId = await resolvePaneId();
 			if (self.released || self.revision !== lifecycleRevision) return;
 			if (!paneId) {
 				scheduleRetry();
 				return;
 			}
-
-			if (lifecycleState === "idle") {
-				try {
-					const response = await herdrRequest("pane.read", {
-						pane_id: paneId,
-						source: "visible",
-						lines: 45,
-						format: "text",
-					});
-					if (self.released) return;
-					if (
-						self.revision === lifecycleRevision &&
-						visibleLooksWorking(String(response.result?.read?.text ?? ""))
-					) {
-						stateSnapshot = "working";
-						customSnapshot = "working";
-					}
-				} catch {
-					// Keep the lifecycle state when pane inspection is temporarily unavailable.
-				}
-			}
-			if (self.released || self.revision !== lifecycleRevision) return;
 
 			const seq = self.nextSeq();
 			latestAttemptSeq = seq;
